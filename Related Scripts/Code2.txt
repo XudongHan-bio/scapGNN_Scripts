@@ -1,0 +1,163 @@
+#Cell clustering evaluation
+#Based on the sciPath framework (https://github.com/chenxing-zhang/sciPath).
+
+library(SNFtool) # SNF;spectralClustering
+library(GSEABase) # getGmt, load pathway information
+library(AUCell) # AUCell, pathway scoring method
+library(SingleCellExperiment)
+library(stats) # kmeans
+library(fastcluster) # fastcluster::hclust
+library(dbscan) # dbscan
+library(wordspace) # dist.matrix, fast distance calculation function
+library(SC3) # SC3
+library(Seurat)# Seurat
+library(cidr) # CIDR
+library(pcaReduce) # pcaReduce
+library(SOUP) # SOUP
+library(aricode)
+library(reticulate)
+source("D:/1ReproductiveMedicine/项目/single_cell_pathway/资料/sciPath-master/package/SOUP_ori.R")
+use_python("/miniconda3/envs/GCN/pythonw.exe", required = T)
+source_python("D:/1ReproductiveMedicine/项目/single_cell_pathway/资料/sciPath-master/package/SNN-Cliq.py") # SNN-Cliq
+
+evaluation_ARI <- function(clust_results,label_int){
+  return(ARI(clust_results,label_int))
+}
+
+evaluation_NMI <- function(clust_results,label_int){
+  return(NMI(clust_results,label_int))
+}
+
+cluster_indictors<-function(matrix,true_label){
+  ARI<-NULL
+  NMI<-NULL
+  method<-NULL
+
+  label_int = as.numeric(as.vector(factor(true_label,levels=unique(true_label),labels=seq(1:length(unique(true_label))))))
+  k = length(unique(label_int)) # real k
+  dis_gene = dist.matrix(t(matrix),method = "euclidean",as.dist = TRUE)
+
+  #1. keams
+  print("1. keams")
+  c = lapply(seq(1:5),kmeans,x=dis_gene,centers=k);
+  clust_results = lapply(c,FUN=function(x) x$cluster)
+  for(i in 1:length(clust_results)){
+    ARI<-c(ARI,evaluation_ARI(clust_results[[i]],label_int))
+    NMI<-c(NMI,evaluation_NMI(clust_results[[i]],label_int))
+    method<-c(method,paste("keams",i,sep = "_"))
+  }
+
+  #2. hierarchical
+  print("2. hierarchical")
+  gcl <- fastcluster::hclust(dis_gene, method = 'ward.D');
+  clust_results <- cutree(gcl, k)
+  ARI<-c(ARI,evaluation_ARI(clust_results,label_int))
+  NMI<-c(NMI,evaluation_NMI(clust_results,label_int))
+  method<-c(method,"hierarchical")
+
+  # 3. spectral
+  print("3. spectral")
+  K = ceiling(dim(matrix)[2]/10)
+  sim_gene = affinityMatrix(as.matrix(dis_gene), K, 0.5);
+  clust_results = spectralClustering(sim_gene, k)
+  ARI<-c(ARI,evaluation_ARI(clust_results,label_int))
+  NMI<-c(NMI,evaluation_NMI(clust_results,label_int))
+  method<-c(method,"spectral")
+
+  # 4. DBSCAN
+  print("4. DBSCAN")
+  b = sort(kNNdist(dis_gene,5)); # dbscan::kNNdistplot(as.dist(1/w_gene), k =  5)
+  eps_vec = b[ceiling(seq(0.5,0.9,by=0.1)*length(b))];
+  d = lapply(eps_vec,dbscan,x=dis_gene);
+  clust_results = lapply(d,FUN=function(x) x$cluster)
+  for(i in 1:length(clust_results)){
+    ARI<-c(ARI,evaluation_ARI(clust_results[[i]],label_int))
+    NMI<-c(NMI,evaluation_NMI(clust_results[[i]],label_int))
+    method<-c(method,paste("DBSCAN",i,sep = "_"))
+  }
+
+  # 5. SC3
+  print("5. SC3")
+  sce <- SingleCellExperiment(assays = list(counts = matrix,logcounts = matrix),colData = colnames(matrix))
+  rowData(sce)$feature_symbol <- rownames(sce)
+  a <- sc3(sce, ks = k, biology = FALSE, gene_filter = FALSE,kmeans_iter_max = 100) #SC3
+  clust_results = as.numeric(as.vector(a@colData[[paste('sc3',as.character(k),'clusters',sep='_')]]))
+  gc()
+  ARI<-c(ARI,evaluation_ARI(clust_results,label_int))
+  NMI<-c(NMI,evaluation_NMI(clust_results,label_int))
+  method<-c(method,"SC3")
+
+  # 6. Seurat
+  print("6. Seurat")
+  pbmc <- CreateSeuratObject(counts=matrix)
+  pbmc <- FindVariableFeatures(object = pbmc)
+  pbmc <- ScaleData(object = pbmc)
+  pbmc <- RunPCA(object = pbmc)
+  pbmc <- FindNeighbors(object = pbmc, reduction = "pca")
+  pbmc <- FindClusters(object = pbmc,resolution = 0.5)
+  clust_results= as.numeric(as.vector(pbmc$seurat_clusters))
+  ARI<-c(ARI,evaluation_ARI(clust_results,label_int))
+  NMI<-c(NMI,evaluation_NMI(clust_results,label_int))
+  method<-c(method,paste("Seurat",0.5,sep = "_"))
+
+  pbmc <- FindClusters(object = pbmc,resolution = 1)
+  clust_results= as.numeric(as.vector(pbmc$seurat_clusters))
+  ARI<-c(ARI,evaluation_ARI(clust_results,label_int))
+  NMI<-c(NMI,evaluation_NMI(clust_results,label_int))
+  method<-c(method,paste("Seurat",1,sep = "_"))
+
+  pbmc <- FindClusters(object = pbmc,resolution = 1.5)
+  clust_results= as.numeric(as.vector(pbmc$seurat_clusters))
+  ARI<-c(ARI,evaluation_ARI(clust_results,label_int))
+  NMI<-c(NMI,evaluation_NMI(clust_results,label_int))
+  method<-c(method,paste("Seurat",1.5,sep = "_"))
+
+  # 7. CIDR
+  print("7. CIDR")
+  sData <- new("scData", tags = matrix, tagType = 'CPM')
+  sData@dissim <- as.matrix(dist.matrix(t(matrix),method = "euclidean",as.dist = TRUE))
+  sData <- scPCA(sData,plotPC = FALSE)
+  sData <- nPC(sData)
+  sData <- scCluster(sData,nCluster =k)
+  clust_results= as.numeric(sData@clusters)
+  ARI<-c(ARI,evaluation_ARI(clust_results,label_int))
+  NMI<-c(NMI,evaluation_NMI(clust_results,label_int))
+  method<-c(method,"CIDR")
+
+  # 8. pcaReduce
+  print("8. pcaReduce")
+  Output_S <- PCAreduce(t(matrix), nbt=5, q=k-1, method='S')
+  clust_results = lapply(seq(1:5),FUN=function(n) as.numeric(Output_S[[n]][,1]))
+  for(i in 1:length(clust_results)){
+    ARI<-c(ARI,evaluation_ARI(clust_results[[i]],label_int))
+    NMI<-c(NMI,evaluation_NMI(clust_results[[i]],label_int))
+    method<-c(method,paste("pcaReduce",i,sep = "_"))
+  }
+
+  # 9. SOUP
+  print("9. SOUP")
+  matrix_t = t(matrix)
+  spca.out = SPCAselect(matrix_t, type="log")
+  spca.genes = spca.out$select.genes
+  log.select.expr = matrix_t[, colnames(matrix_t) %in% spca.genes]
+  k_soup = min(nrow(log.select.expr)-1, ncol(log.select.expr)-1, k)
+  soup.out = try(SOUP(log.select.expr, Ks=k_soup, type="log"))
+  if('try-error' %in% class(soup.out)){soup.out  = SOUP(log.select.expr,type="log")}
+  soup.labels = soup.out$major.labels[[1]]
+  clust_results = as.numeric(soup.labels)
+  ARI<-c(ARI,evaluation_ARI(clust_results,label_int))
+  NMI<-c(NMI,evaluation_NMI(clust_results,label_int))
+  method<-c(method,"SOUP")
+
+  # 10. SNN-Cliq
+  print("10. SNN-Cliq")
+  clust_results = snn_cliq(as.matrix(dis_gene), 0.5, 0.7,k)
+  ARI<-c(ARI,evaluation_ARI(clust_results,label_int))
+  NMI<-c(NMI,evaluation_NMI(clust_results,label_int))
+  method<-c(method,"SNN-Cliq")
+
+  result<-data.frame(ARI=ARI,NMI=NMI,method=method)
+  return(result)
+}
+
+Cluster_indictors<-cluster_indictors(Matrix, Cell_label)

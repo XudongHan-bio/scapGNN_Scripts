@@ -1,0 +1,32 @@
+# Implementation of the pathway activity scoring method.
+
+#AUCell
+devtools::install_github('zgyaru/testSctpa')
+library(testSctpa)
+library(scapGNN)
+AUCell_matrix = cal_PAS(seurat_object = RNA_exp,
+              tool = 'AUCell', 
+              normalize = 'log',
+              gmt_file=".../sapGNN/inst/extdata/KEGG_human.gmt")
+
+#Pagoda2
+library(scde)
+library(pagoda2)
+library(testSctpa)
+Pathway_list<-load_gs_data(".../sapGNN/inst/extdata/KEGG_human.gmt")
+Pagoda_matrix<-cal_pagoda2(RNA_exp,Pathway_list,n_cores=1)
+
+#UniPath
+library(UniPath)
+Pval = binorm(human_null_data)
+Pval1 = binorm(RNA_exp)
+combp_ref = combine(Pathway,human_null_data,rownames(human_null_data),Pval,thr=10)
+combp = combine(pathway,RNA_exp,rownames(RNA_exp),Pval1,thr=10)
+UniPath_matrix = adjust(combp,combp_ref)
+
+#GSVA
+library(GSVA)
+GSVA_matrix <- gsva(RNA_exp, Pathway_list, method="gsva")
+
+#ssGSEA
+ssGSEA_matrix <- gsva(RNA_exp, Pathway_list, method="ssgsea")
